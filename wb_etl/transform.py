@@ -38,7 +38,7 @@ def transform_indicator_data(df: pd.DataFrame) -> pd.DataFrame:
     - removal of missing observations
     - duplicate removal
     - sorting
-    - year-over-year percentage change by country
+    - year-over-year percentage change by country (only between consecutive years)
     - creation of a composite natural key
     """
     validate_columns(df)
@@ -61,11 +61,12 @@ def transform_indicator_data(df: pd.DataFrame) -> pd.DataFrame:
 
     clean = clean.sort_values(["country_code", "year"]).reset_index(drop=True)
 
-    clean["year_over_year_pct_change"] = (
-        clean.groupby(["country_code", "indicator_code"])["value"]
-        .pct_change(fill_method=None)
-        .mul(100)
-    )
+    grouped = clean.groupby(["country_code", "indicator_code"])
+    clean["year_over_year_pct_change"] = grouped["value"].pct_change(fill_method=None).mul(100)
+    # Only a true year-over-year change: if the previous available year isn't year - 1
+    # (a gap left by a missing observation), there is no YoY value.
+    previous_year = grouped["year"].shift(1)
+    clean.loc[previous_year != clean["year"] - 1, "year_over_year_pct_change"] = float("nan")
 
     clean["record_key"] = (
         clean["country_code"].astype(str)
@@ -75,15 +76,16 @@ def transform_indicator_data(df: pd.DataFrame) -> pd.DataFrame:
         + clean["year"].astype(str)
     )
 
-    return clean[
-        [
-            "record_key",
-            "country_code",
-            "country_name",
-            "year",
-            "indicator_code",
-            "indicator_name",
-            "value",
-            "year_over_year_pct_change",
-        ]
+    columns = [
+        "record_key",
+        "country_code",
+        "country_name",
+        "year",
+        "indicator_code",
+        "indicator_name",
+        "value",
+        "year_over_year_pct_change",
     ]
+    if "source_updated_at" in clean.columns:
+        columns.append("source_updated_at")
+    return clean[columns]

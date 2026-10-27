@@ -1,0 +1,5 @@
+# Tested with Python 3.11-3.13
+pandas>=2.1
+requests>=2.31
+sqlalchemy>=2.0
+psycopg2-binary>=2.9   # only used with --destination postgres
