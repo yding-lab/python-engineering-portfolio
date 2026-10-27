@@ -1,2 +1,133 @@
-# python-engineering-portfolio
-Python projects featuring ETL pipelines, data processing, SQL integration, automation, testing, and software engineering practices.
+# Python engineering portfolio: World Bank indicator ETL
+
+[![tests](https://github.com/yding-lab/python-engineering-portfolio/actions/workflows/tests.yml/badge.svg)](https://github.com/yding-lab/python-engineering-portfolio/actions/workflows/tests.yml)
+
+A small, production-style ETL pipeline. It extracts an indicator from the World Bank API, cleans it and computes year-over-year change, gates it on data-quality checks, and writes it to CSV (the default) or upserts it idempotently into PostgreSQL. It includes structured logs, no hard-coded credentials, and tests against a real database.
+
+```
+World Bank API ──extract──> raw CSV ──transform──> quality gate ──> processed CSV + quality report
+                (retries,           (types, nulls,  (fails the run      │
+                 pagination)         dedupe, YoY,    before anything     └─(--destination postgres)─>
+                                     record_key)     is persisted)            staging + UPSERT, one transaction
+```
+
+## Quick start
+
+Requires Python 3.11–3.13 and internet access to `api.worldbank.org`. The CSV run needs no database and no credentials.
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+
+python -m wb_etl                       # GDP per capita, 7 countries, 2015-2025 -> data/
+python -m pytest -q                    # unit tests; PostgreSQL tests skip unless DB_* is set
+```
+
+Options: `--countries USA,CAN,MEX`, `--indicator SP.POP.TOTL`, `--start-year`, `--end-year`, `--destination {csv,postgres}`, `--data-dir`, `--log-dir`, `--log-level`, and `--from-raw <csv>` to rerun from a saved extract with no network access. The process exits non-zero on any failure, so it can be scheduled.
+
+## Example output
+
+This is a real run from CI (`.github/workflows/tests.yml`), on a fresh PostgreSQL database, with the World Bank data as last updated 2026-10-08. Timestamps and start lines are trimmed:
+
+```text
+INFO | wb_etl.pipeline | pipeline run 7ab217d29149: indicator NY.GDP.PCAP.CD, 7 countries, 2015-2025, destination postgres
+INFO | wb_etl.pipeline | extract finished: 77 rows in 0.48s
+INFO | wb_etl.pipeline | transform finished: 77 rows in 0.01s
+INFO | wb_etl.pipeline | quality finished: 77 rows in 0.00s
+INFO | wb_etl.pipeline | persist_csv finished: 77 rows in 0.00s
+INFO | wb_etl.pipeline | upsert: 77 inserted, 0 updated, 0 unchanged
+```
+
+Running the same command again:
+
+```text
+INFO | wb_etl.pipeline | upsert: 0 inserted, 0 updated, 77 unchanged
+```
+
+`data/processed/NY.GDP.PCAP.CD.csv` (first rows):
+
+```csv
+record_key,country_code,country_name,year,indicator_code,indicator_name,value,year_over_year_pct_change,source_updated_at
+AUS_NY.GDP.PCAP.CD_2015,AUS,Australia,2015,NY.GDP.PCAP.CD,GDP per capita (current US$),56970.3613028094,,2026-10-08
+AUS_NY.GDP.PCAP.CD_2016,AUS,Australia,2016,NY.GDP.PCAP.CD,GDP per capita (current US$),50084.4440606385,-12.086841446503737,2026-10-08
+AUS_NY.GDP.PCAP.CD_2017,AUS,Australia,2017,NY.GDP.PCAP.CD,GDP per capita (current US$),54117.547718609,8.052607418557978,2026-10-08
+```
+
+`data/processed/NY.GDP.PCAP.CD_quality.json`: `passed: true`, 77 rows, 7 countries, 11 years, 0 duplicate keys, 0 nulls in core columns, 0 negative values, 0 year-over-year moves above 50%.
+
+The figures are World Bank data. Indicator values change when the World Bank revises them.
+
+## Configuration
+
+**CSV is the default destination** and needs no configuration. PostgreSQL is optional.
+
+```bash
+cp .env.example .env                  # set DB_USER and DB_PASSWORD (no defaults exist)
+set -a && source .env && set +a       # export them into this shell
+docker compose --env-file .env up -d  # local PostgreSQL 16, using the same credentials
+python -m wb_etl --destination postgres
+```
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `DB_USER`, `DB_PASSWORD` | for postgres | none | The pipeline refuses to start without them |
+| `DB_HOST`, `DB_PORT`, `DB_NAME` | no | `localhost`, `5432`, `portfolio` | Connection |
+| `DB_CONNECT_TIMEOUT` | no | `10` | Seconds |
+| `ETL_DESTINATION`, `LOG_LEVEL`, `LOG_DIR` | no | `csv`, `INFO`, `logs/` | Same as the CLI flags |
+
+`.env` is git-ignored. The password is never printed: it's excluded from the config object's `repr`, masked in the connection string that's logged (`postgresql+psycopg2://etl:***@localhost:5432/portfolio`), and removed from log messages and tracebacks by a redaction filter on every log handler. CI checks that the database password doesn't appear anywhere in the logs.
+
+## Idempotent loading
+
+- **Business key:** `record_key = <country>_<indicator>_<year>`, the table's primary key.
+- **CSV:** each run writes to a temp file and atomically replaces the output, so a crash never leaves a half-written file and identical inputs produce identical files.
+- **PostgreSQL:** rows go into a staging table, then `INSERT ... ON CONFLICT (record_key) DO UPDATE ... WHERE value IS DISTINCT FROM EXCLUDED.value OR ...`:
+  - new keys are inserted;
+  - existing keys are updated only if the value, country name or YoY change differs, so a World Bank revision updates exactly the revised rows;
+  - identical rows aren't touched and keep their `pipeline_loaded_at`;
+  - `RETURNING (xmax = 0)` separates inserts from updates for the log line above.
+- **Atomicity:** staging, merge and cleanup run in one transaction. If anything fails, such as a constraint violation, the whole load rolls back and the error message names the problem without echoing SQL or row values.
+- **Not handled:** rows that disappear from the source aren't deleted, and two loads must not run at the same time, because they share the staging table.
+
+## Data quality gate
+
+The gate runs after the transform and before anything is persisted (`wb_etl/quality.py`).
+
+- **Errors stop the run:** an empty dataset, duplicate keys, a null rate above 5% in core columns, years outside the requested range, expected countries missing, or non-numeric values. The quality report is still written, so you can see why.
+- **Warnings are logged** and the run continues: negative values, and YoY changes above 50%.
+
+## Logs
+
+The console gets human-readable lines. `logs/pipeline.jsonl` gets one JSON object per event, with `pipeline_run_id`, `stage`, `record_count` and `duration_seconds`, so every stage of every run can be traced and timed. The file rotates at 5 MB.
+
+## Tests
+
+```bash
+python -m pytest -q                                          # 20 unit tests, offline
+DB_USER=... DB_PASSWORD=... python -m pytest -q              # + 2 PostgreSQL integration tests
+```
+
+The tests cover:
+- transform: keys, YoY only across consecutive years, null and duplicate handling;
+- quality: the gate passes clean data and flags each kind of problem;
+- extract: pagination, API error payloads, invalid arguments (no network needed);
+- the end-to-end pipeline, idempotent reruns, and that a failed quality gate persists nothing;
+- credentials: required, masked, and never logged;
+- against real PostgreSQL: insert, then no-op, then revision, and full rollback on failure.
+
+CI runs everything against a PostgreSQL 16 service, then performs the live World Bank run twice.
+
+## Layout
+
+```
+wb_etl/
+  extract.py         World Bank API client: retries, pagination, source "last updated" date
+  transform.py       validation, typing, dedupe, YoY change, record_key
+  quality.py         quality checks -> QualityCheckResult (errors vs. warnings, metrics)
+  load.py            PostgreSQL staging + upsert in one transaction
+  database.py        config from env (no default credentials), engine, schema
+  logging_config.py  console + JSON-lines logs, credential redaction
+  pipeline.py        orchestration and CLI (python -m wb_etl)
+tests/               unit + PostgreSQL integration tests
+docker-compose.yml   local PostgreSQL for --destination postgres
+```
