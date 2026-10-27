@@ -17,10 +17,15 @@ def engine():
     from wb_etl.database import DatabaseConfig, create_database_engine
 
     eng = create_database_engine(DatabaseConfig.from_env())
-    with eng.begin() as c:
-        c.execute(text("DROP TABLE IF EXISTS economic_indicators_staging"))
-        c.execute(text("DROP TABLE IF EXISTS economic_indicators"))
+
+    def drop():
+        with eng.begin() as c:
+            c.execute(text("DROP TABLE IF EXISTS economic_indicators_staging"))
+            c.execute(text("DROP TABLE IF EXISTS economic_indicators"))
+
+    drop()
     yield eng
+    drop()  # leave the database as we found it: test rows must never mix with real data
     eng.dispose()
 
 
