@@ -1,0 +1,50 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: etl
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: portfolio
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U etl" --health-interval 5s --health-retries 10
+    env:
+      DB_USER: etl
+      DB_PASSWORD: ci-only-password
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Unit tests + PostgreSQL integration tests
+        run: python -m pytest -q
+      - name: Live run against the World Bank API, loading into PostgreSQL twice
+        run: |
+          python -m wb_etl --destination postgres | tee run1.json
+          python -m wb_etl --destination postgres | tee run2.json
+          head -n 6 data/processed/NY.GDP.PCAP.CD.csv
+          cat data/processed/NY.GDP.PCAP.CD_quality.json
+      - name: Publish the live run's output as annotations (readable without log access)
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          def note(title, text):
+              print(f"::notice title={title}::" + text.replace("%", "%25").replace("\n", "%0A"))
+          note("run1", pathlib.Path("run1.json").read_text())
+          note("run2", pathlib.Path("run2.json").read_text())
+          note("processed head", "\n".join(pathlib.Path("data/processed/NY.GDP.PCAP.CD.csv").read_text().splitlines()[:6]))
+          note("quality", pathlib.Path("data/processed/NY.GDP.PCAP.CD_quality.json").read_text())
+          PY
+      - name: No credentials in the logs
+        run: "! grep -r ci-only-password logs/"

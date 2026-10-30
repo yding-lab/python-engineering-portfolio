@@ -1,0 +1,20 @@
+# Local PostgreSQL for --destination postgres. Credentials come from your .env:
+#   cp .env.example .env   # set DB_USER and DB_PASSWORD
+#   docker compose --env-file .env up -d
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${DB_USER:?set DB_USER in .env}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      POSTGRES_DB: ${DB_NAME:-portfolio}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      retries: 10
+volumes:
+  pgdata:

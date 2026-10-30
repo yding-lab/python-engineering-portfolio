@@ -2,54 +2,76 @@
 
 This module centralizes PostgreSQL connection creation, health checks,
 transaction handling, and table metadata used by the loading layer.
+
+Credentials come only from the environment (DB_USER, DB_PASSWORD). There are no defaults:
+a missing credential is a configuration error, never a silent fallback to postgres/postgres.
 """
 
 from __future__ import annotations
 
 import os
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Generator
 
 from sqlalchemy import Engine, create_engine, text
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import URL, Connection
 from sqlalchemy.exc import SQLAlchemyError
+
+
+class DatabaseConnectionError(RuntimeError):
+    """Raised when the application cannot connect to PostgreSQL."""
+
+
+class DatabaseConfigError(ValueError):
+    """Raised when required database settings are missing."""
 
 
 @dataclass(frozen=True)
 class DatabaseConfig:
     """Connection settings for the PostgreSQL warehouse."""
 
+    username: str
+    password: str = field(repr=False)  # never printed, even in a debugger or a log of the config
     host: str = "localhost"
     port: int = 5432
     database: str = "portfolio"
-    username: str = "postgres"
-    password: str = "postgres"
     connect_timeout: int = 10
 
     @classmethod
     def from_env(cls) -> "DatabaseConfig":
-        """Build database configuration from environment variables."""
+        """Build database configuration from environment variables (see .env.example)."""
+        missing = [name for name in ("DB_USER", "DB_PASSWORD") if not os.getenv(name)]
+        if missing:
+            raise DatabaseConfigError(
+                f"Missing required environment variable(s): {', '.join(missing)}. "
+                "Copy .env.example to .env, fill it in, and export it (see README)."
+            )
         return cls(
+            username=os.environ["DB_USER"],
+            password=os.environ["DB_PASSWORD"],
             host=os.getenv("DB_HOST", "localhost"),
             port=int(os.getenv("DB_PORT", "5432")),
             database=os.getenv("DB_NAME", "portfolio"),
-            username=os.getenv("DB_USER", "postgres"),
-            password=os.getenv("DB_PASSWORD", "postgres"),
             connect_timeout=int(os.getenv("DB_CONNECT_TIMEOUT", "10")),
         )
 
     @property
-    def sqlalchemy_url(self) -> str:
-        """Return a SQLAlchemy PostgreSQL connection URL."""
-        return (
-            f"postgresql+psycopg2://{self.username}:{self.password}"
-            f"@{self.host}:{self.port}/{self.database}"
+    def sqlalchemy_url(self) -> URL:
+        """SQLAlchemy URL object. Special characters in the password are escaped, and
+        str(url) masks the password as ***."""
+        return URL.create(
+            "postgresql+psycopg2",
+            username=self.username,
+            password=self.password,
+            host=self.host,
+            port=self.port,
+            database=self.database,
         )
 
-
-class DatabaseConnectionError(RuntimeError):
-    """Raised when the application cannot connect to PostgreSQL."""
+    def safe_url(self) -> str:
+        """Connection string safe to log."""
+        return self.sqlalchemy_url.render_as_string(hide_password=True)
 
 
 def create_database_engine(

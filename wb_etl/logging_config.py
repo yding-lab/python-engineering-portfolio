@@ -5,9 +5,39 @@ from __future__ import annotations
 import json
 import logging
 import logging.config
+import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+SECRET_PATTERNS = [
+    re.compile(r"(://[^:/@\s]+:)[^@\s]+(@)"),  # user:password@ in connection URLs
+    re.compile(r"(?i)((?:password|passwd|pwd|secret|token|api[_-]?key)\s*[=:]\s*)[^\s,;&'\"]+"),
+]
+
+
+def redact(text: str) -> str:
+    """Mask credentials in a log message."""
+    for pattern in SECRET_PATTERNS:
+        text = pattern.sub(lambda m: m.group(1) + "***" + (m.group(2) if m.lastindex == 2 else ""), text)
+    secret = os.getenv("DB_PASSWORD")
+    if secret and len(secret) >= 4:
+        text = text.replace(secret, "***")
+    return text
+
+
+class RedactingFilter(logging.Filter):
+    """Applied to every handler: credentials never reach the console or the log file."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = redact(record.getMessage())
+        record.args = None
+        if record.exc_info and record.exc_info[1] is not None:
+            record.exc_text = redact(logging.Formatter().formatException(record.exc_info))
+            record.exc_info = None
+        return True
 
 
 class JsonFormatter(logging.Formatter):
@@ -26,12 +56,15 @@ class JsonFormatter(logging.Formatter):
 
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
+        elif record.exc_text:
+            payload["exception"] = record.exc_text
 
         for field in (
             "pipeline_run_id",
             "stage",
             "record_count",
             "duration_seconds",
+            "destination",
         ):
             value = getattr(record, field, None)
             if value is not None:
@@ -56,6 +89,7 @@ def configure_logging(
     config = {
         "version": 1,
         "disable_existing_loggers": False,
+        "filters": {"redact": {"()": RedactingFilter}},
         "formatters": {
             "console": {
                 "format": (
@@ -71,12 +105,14 @@ def configure_logging(
                 "class": "logging.StreamHandler",
                 "level": log_level.upper(),
                 "formatter": "console",
+                "filters": ["redact"],
                 "stream": "ext://sys.stdout",
             },
             "file": {
                 "class": "logging.handlers.RotatingFileHandler",
                 "level": log_level.upper(),
                 "formatter": "json",
+                "filters": ["redact"],
                 "filename": str(log_dir / "pipeline.jsonl"),
                 "maxBytes": 5_000_000,
                 "backupCount": 5,
