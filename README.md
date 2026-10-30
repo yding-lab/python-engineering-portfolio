@@ -89,12 +89,33 @@ python -m wb_etl --destination postgres
 - **Atomicity:** staging, merge and cleanup run in one transaction. If anything fails, such as a constraint violation, the whole load rolls back and the error message names the problem without echoing SQL or row values.
 - **Not handled:** rows that disappear from the source aren't deleted, and two loads must not run at the same time, because they share the staging table.
 
-## Data quality gate
+## Cleaning and the data quality gate
 
-The gate runs after the transform and before anything is persisted (`wb_etl/quality.py`).
+**Cleaning is accounted for, row by row** (`clean_indicator_data` in `wb_etl/transform.py`). Every input row that doesn't reach the output is counted under exactly one reason, and the counts and ratios go into the quality report and the log:
 
-- **Errors stop the run:** an empty dataset, duplicate keys, a null rate above 5% in core columns, years outside the requested range, expected countries missing, or non-numeric values. The quality report is still written, so you can see why.
-- **Warnings are logged** and the run continues: negative values, and YoY changes above 50%.
+| Reason | Meaning |
+|---|---|
+| `missing_key` | country, indicator or year absent |
+| `invalid_year` | year present but not an integer |
+| `missing_value` | value absent in the source (null or blank). The World Bank returns null for years it hasn't published yet |
+| `unparseable_value` | value present but not a number, e.g. `"n/a"` |
+| `non_finite_value` | value parses to `inf` or `-inf` |
+| `duplicates` | same country, indicator and year (the last occurrence is kept) |
+
+**Year-over-year change** is `100 × (value / previous − 1)`. It's defined only when the previous observation is exactly the year before and its value isn't zero. A zero base would give ±inf (or NaN for 0 → 0), so that change is left blank and counted as `yoy_undefined_zero_base`, with a warning. A drop *to* zero is a defined −100%.
+
+**The gate** runs after the transform and before anything is persisted (`wb_etl/quality.py`):
+
+- **Errors stop the run:**
+  - an empty dataset, duplicate keys, a null rate above 5% in core columns, years outside the requested range, or expected countries missing;
+  - non-numeric or non-finite (`inf`/`-inf`) values in the output's `value` or YoY columns;
+  - any unparseable or non-finite *source* value. The API returns a number or null, so anything else means a source or parsing problem, not a gap. `allow_invalid_values=True` relaxes this;
+  - cleaning that dropped more than 25% of the input rows (`max_dropped_rate`), for any reason.
+
+  The quality report is still written, so you can see why.
+- **Warnings are logged** and the run continues: any dropped rows (with counts by reason), blank YoY from a zero base, negative values, and YoY changes above 50%.
+
+So a run that loses most of its input can't report `passed: true` with only the surviving rows in view.
 
 ## Logs
 
@@ -103,15 +124,16 @@ The console gets human-readable lines. `logs/pipeline.jsonl` gets one JSON objec
 ## Tests
 
 ```bash
-python -m pytest -q                                          # 20 unit tests, offline
+python -m pytest -q                                          # 26 unit tests, offline
 DB_USER=... DB_PASSWORD=... python -m pytest -q              # + 2 PostgreSQL integration tests
 ```
 
 The tests cover:
 - transform: keys, YoY only across consecutive years, null and duplicate handling;
-- quality: the gate passes clean data and flags each kind of problem;
+- cleaning: each drop reason counted separately (missing, unparseable, non-finite, duplicate, bad key or year), YoY left blank on a zero base and never infinite;
+- quality: the gate passes clean data, rejects `inf`/`-inf` and invalid source values, fails on heavy drops, and reports drops even when it passes;
 - extract: pagination, API error payloads, invalid arguments (no network needed);
-- the end-to-end pipeline, idempotent reruns, and that a failed quality gate persists nothing;
+- the end-to-end pipeline, idempotent reruns, the cleaning statistics in the written report, and that a failed quality gate (for example, an `inf` in the source) persists nothing;
 - credentials: required, masked, and never logged;
 - against real PostgreSQL: insert, then no-op, then revision, and full rollback on failure.
 
@@ -122,7 +144,7 @@ CI runs everything against a PostgreSQL 16 service, then performs the live World
 ```
 wb_etl/
   extract.py         World Bank API client: retries, pagination, source "last updated" date
-  transform.py       validation, typing, dedupe, YoY change, record_key
+  transform.py       validation, typing, dedupe, YoY change, record_key, CleaningStats
   quality.py         quality checks -> QualityCheckResult (errors vs. warnings, metrics)
   load.py            PostgreSQL staging + upsert in one transaction
   database.py        config from env (no default credentials), engine, schema

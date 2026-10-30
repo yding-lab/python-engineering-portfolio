@@ -27,7 +27,7 @@ import pandas as pd
 from .extract import fetch_indicator_data
 from .logging_config import configure_logging
 from .quality import QualityCheckResult, run_quality_checks
-from .transform import transform_indicator_data
+from .transform import clean_indicator_data
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -43,6 +43,7 @@ class PipelineConfig:
     destination: str = "csv"  # csv | postgres (postgres also writes the CSVs)
     data_dir: Path = PROJECT_ROOT / "data"
     max_null_rate: float = 0.05
+    max_dropped_rate: float = 0.25  # share of input rows the transform may drop before the gate fails
 
     @property
     def raw_path(self) -> Path:
@@ -111,8 +112,13 @@ def run_pipeline(config: PipelineConfig | None = None, from_raw: Path | None = N
         s["record_count"] = len(raw_df)
 
     with stage("transform", run_id) as s:
-        processed_df = transform_indicator_data(raw_df)
+        processed_df, cleaning = clean_indicator_data(raw_df)
         s["record_count"] = len(processed_df)
+        log.info("cleaning: %d in, %d out, dropped %d (missing value %d, unparseable %d, non-finite %d, "
+                 "missing key %d, invalid year %d, duplicate %d)", cleaning.input_rows, cleaning.output_rows,
+                 cleaning.dropped_rows, cleaning.dropped_missing_value, cleaning.dropped_unparseable_value,
+                 cleaning.dropped_non_finite_value, cleaning.dropped_missing_key, cleaning.dropped_invalid_year,
+                 cleaning.dropped_duplicates, extra={"pipeline_run_id": run_id, "stage": "transform"})
 
     with stage("quality", run_id) as s:
         quality = run_quality_checks(
@@ -121,6 +127,8 @@ def run_pipeline(config: PipelineConfig | None = None, from_raw: Path | None = N
             minimum_year=config.start_year,
             maximum_year=config.end_year,
             max_null_rate=config.max_null_rate,
+            cleaning=cleaning.to_dict(),
+            max_dropped_rate=config.max_dropped_rate,
             fail_on_error=False,
         )
         s["record_count"] = len(processed_df)
@@ -194,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(json.dumps({"run_id": result.run_id, "raw_rows": result.raw_rows,
                       "processed_rows": result.processed_rows, "quality_passed": result.quality.passed,
+                      "cleaning": result.quality.cleaning,
                       "warnings": result.quality.warnings, "outputs": result.outputs, "load": result.load},
                      indent=2))
     return 0
