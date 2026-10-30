@@ -57,7 +57,8 @@ class CleaningStats:
         d["dropped_rows"] = self.dropped_rows
         n = self.input_rows or 1
         d["ratios"] = {k.removeprefix("dropped_"): round(v / n, 6) for k, v in d.items()
-                       if k.startswith("dropped_")}
+                       if k.startswith("dropped_") and k != "dropped_rows"}
+        d["ratios"]["total"] = round(self.dropped_rows / n, 6)
         return d
 
 

@@ -27,11 +27,12 @@ Options: `--countries USA,CAN,MEX`, `--indicator SP.POP.TOTL`, `--start-year`, `
 
 ## Example output
 
-This is a real run from CI (`.github/workflows/tests.yml`), on a fresh PostgreSQL database, with the World Bank data as last updated 2026-10-08. Timestamps and start lines are trimmed:
+This is a real run from CI (`.github/workflows/tests.yml`, 2026-10-30), on a fresh PostgreSQL database, with the World Bank data as last updated 2026-10-08. Timestamps and start lines are trimmed:
 
 ```text
-INFO | wb_etl.pipeline | pipeline run 7ab217d29149: indicator NY.GDP.PCAP.CD, 7 countries, 2015-2025, destination postgres
-INFO | wb_etl.pipeline | extract finished: 77 rows in 0.48s
+INFO | wb_etl.pipeline | pipeline run ded5f4dae33b: indicator NY.GDP.PCAP.CD, 7 countries, 2015-2025, destination postgres
+INFO | wb_etl.pipeline | extract finished: 77 rows in 0.58s
+INFO | wb_etl.pipeline | cleaning: 77 in, 77 out, dropped 0 (missing value 0, unparseable 0, non-finite 0, missing key 0, invalid year 0, duplicate 0)
 INFO | wb_etl.pipeline | transform finished: 77 rows in 0.01s
 INFO | wb_etl.pipeline | quality finished: 77 rows in 0.00s
 INFO | wb_etl.pipeline | persist_csv finished: 77 rows in 0.00s
@@ -53,7 +54,7 @@ AUS_NY.GDP.PCAP.CD_2016,AUS,Australia,2016,NY.GDP.PCAP.CD,GDP per capita (curren
 AUS_NY.GDP.PCAP.CD_2017,AUS,Australia,2017,NY.GDP.PCAP.CD,GDP per capita (current US$),54117.547718609,8.052607418557978,2026-10-08
 ```
 
-`data/processed/NY.GDP.PCAP.CD_quality.json`: `passed: true`, 77 rows, 7 countries, 11 years, 0 duplicate keys, 0 nulls in core columns, 0 negative values, 0 year-over-year moves above 50%.
+`data/processed/NY.GDP.PCAP.CD_quality.json`: `passed: true`. Cleaning took in 77 rows and kept all 77 (0 missing, unparseable, non-finite or duplicate). The output has 7 countries, 11 years, 0 duplicate keys, 0 nulls in core columns, 0 non-finite values, 0 negative values, and 0 year-over-year moves above 50%. All 7 countries had published 2025 values on that date. When a year isn't published yet, those rows show up as `dropped_missing_value` with a warning, rather than disappearing silently.
 
 The figures are World Bank data. Indicator values change when the World Bank revises them.
 
